@@ -104,6 +104,15 @@ fi
 # 2026-05-14 admin.trustx.biz outage). Compose is idempotent here:
 # already-running containers with unchanged image/config are not touched,
 # so this is safe to run regardless of prior state.
+# Bind-mounted upload dirs are gitignored, so a fresh clone lacks them.
+# Docker would auto-create them as root, but the app runs as uid 1001
+# (non-root) and crashes with 'Permission denied: /app/uploads/banners'.
+# Pre-create them owned by the container user. chown needs root (works when
+# deploy runs via sudo/root); chmod 777 is the no-root fallback.
+echo "==> ensuring backend/uploads is writable by container user (uid 1001)"
+mkdir -p backend/uploads/banners backend/uploads/wallet backend/uploads/kyc
+chown -R 1001:1001 backend/uploads 2>/dev/null || chmod -R 777 backend/uploads 2>/dev/null || true
+
 echo "==> docker compose up -d  (full stack — --service only scopes build)"
 "${COMPOSE[@]}" up -d
 
