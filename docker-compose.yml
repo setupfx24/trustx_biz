@@ -1,0 +1,245 @@
+# trustx stack (project name → container/volume prefix).
+name: trustx
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trustx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trustx_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-trustx}
+    # No host port binding — all services connect via Docker network (postgres:5432)
+    # For local dev access: docker compose exec postgres psql -U trustx
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./backend/infra/docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustx"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: ${TIMESCALE_USER:-trustx}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD:-trustx_dev}
+      POSTGRES_DB: ${TIMESCALE_DB:-marketdata}
+    # No host port binding — all services connect via Docker network (timescaledb:5432)
+    volumes:
+      - ts_data:/var/lib/postgresql/data
+      - ./backend/infra/docker/init-timescale.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustx"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    # No host port binding — all services connect via Docker network (redis:6379)
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Kafka / Zookeeper / Kafka-UI removed.
+  # The kafka_client.py producer no-ops gracefully when no broker is reachable;
+  # all current produce_event() call sites are fire-and-forget event mirrors
+  # with no consumer wired. Re-enable in future by restoring a "kafka:" service
+  # definition (see git history) and setting KAFKA_BOOTSTRAP_SERVERS in .env.
+
+  # Admin dashboard API (port 8001)
+  # Loads secrets from backend/.env (Compose does NOT auto-load that path for ${VAR} substitution).
+  admin-api:
+    build:
+      context: .
+      dockerfile: backend/services/admin/Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - path: ./.env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Override: shared backend/.env uses REDIS_URL for gateway (db 0); admin service must use db 1
+      REDIS_URL: redis://redis:6379/1
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-trustx}:${POSTGRES_PASSWORD:-trustx_dev}@postgres:5432/${POSTGRES_DB:-trustx}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?Set ADMIN_JWT_SECRET in .env}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      BANNERS_UPLOAD_DIR: /app/uploads/banners
+      WALLET_UPLOAD_ROOT: /app/uploads/wallet
+    volumes:
+      - ./backend/services/admin:/app
+      - ./backend/packages/common:/app/packages/common
+      - ./backend/uploads:/app/uploads
+    command:
+      ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: backend/services/gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: ./.env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      BANNERS_UPLOAD_DIR: /app/uploads/banners
+      WALLET_UPLOAD_ROOT: /app/uploads/wallet
+    volumes:
+      - ./backend/services/gateway:/app/services/gateway
+      - ./backend/packages:/app/packages
+      - ./backend/uploads:/app/uploads
+    # Dev: hot reload. docker-compose.prod.yml overrides without --reload.
+    command:
+      [
+        "uvicorn",
+        "services.gateway.src.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
+
+  market-data:
+    build:
+      context: .
+      dockerfile: backend/services/market-data/Dockerfile
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      # AllTick is the production tick source (real-time WS depth feed).
+      # If ALLTICK_TOKEN is empty / placeholder, market-data drops back to
+      # FeedSimulator + Binance for crypto so dev environments still tick.
+      ALLTICK_TOKEN: ${ALLTICK_TOKEN:-}
+      ALLTICK_FOREX_WS_URL: ${ALLTICK_FOREX_WS_URL:-wss://quote.alltick.co/quote-b-ws-api}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/services/market-data:/app/services/market_data
+      - ./backend/packages:/app/packages
+
+  b-book-engine:
+    build:
+      context: .
+      dockerfile: backend/services/b-book-engine/Dockerfile
+    env_file:
+      - path: ./.env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/services/b-book-engine:/app/services/b_book_engine
+      - ./backend/packages:/app/packages
+
+  risk-engine:
+    build:
+      context: .
+      dockerfile: backend/services/risk-engine/Dockerfile
+    env_file:
+      - path: ./.env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/services/risk-engine:/app/services/risk_engine
+      - ./backend/packages:/app/packages
+
+  # Trader frontend (port 3000) — RESTART ALONE IS NOT ENOUGH. Rebuild the image or the browser keeps old JS:
+  #   PowerShell:  $env:APP_VERSION=(Get-Date -Format 'yyyyMMdd-HHmmss'); docker compose build --no-cache trader-frontend; docker compose up -d trader-frontend
+  #   Bash:        APP_VERSION=$(date +%Y%m%d-%H%M%S) docker compose build --no-cache trader-frontend && docker compose up -d trader-frontend
+  # After deploy: hard-refresh (Ctrl+Shift+R). Top bar shows APP_VERSION when set (xl screens).
+  trader-frontend:
+    build:
+      context: ./frontend/trader
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_VERSION: ${APP_VERSION:-docker}
+        # NEXT_PUBLIC_* vars are baked into the JS bundle at build time —
+        # setting them under `environment:` at runtime has zero effect on
+        # the static bundle, so each one MUST be forwarded as a build arg
+        # for the value to actually reach the browser.
+        NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}
+        NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID:-}
+        NEXT_PUBLIC_MARKETING_HOST: ${NEXT_PUBLIC_MARKETING_HOST:-}
+        NEXT_PUBLIC_TRADE_HOST: ${NEXT_PUBLIC_TRADE_HOST:-}
+    ports:
+      # Host 3010 if 3000 is already taken (local Next/other apps)
+      - "3010:3000"
+    environment:
+      # Do NOT set NEXT_PUBLIC_* http/ws here — browsers on https:// will hit mixed-content blocks.
+      # App route src/app/api/v1/[...path]/route.ts proxies using INTERNAL_API_URL or TRADER_API_PROXY_TARGET.
+      INTERNAL_API_URL: http://gateway:8000/api/v1
+      TRADER_API_PROXY_TARGET: http://gateway:8000
+    depends_on:
+      - gateway
+
+  # Admin frontend — host 3011 if 3001 is already taken
+  admin-frontend:
+    build:
+      context: ./frontend/admin
+      dockerfile: Dockerfile
+    ports:
+      - "3011:3001"
+    environment:
+      # Server-side proxy /admin-api → admin-api (browser must not use docker hostname admin-api)
+      ADMIN_API_PROXY_TARGET: http://admin-api:8001
+    depends_on:
+      - gateway
+      - admin-api
+
+  # One-off migration runner — NOT started automatically.
+  # Run with: docker compose --profile migrate up migrate
+  migrate:
+    image: python:3.12-slim
+    working_dir: /app
+    command: >
+      sh -c "pip install -e packages/common --quiet &&
+             pip install alembic sqlalchemy[asyncio] asyncpg --quiet &&
+             alembic -c infra/migrations/alembic.ini upgrade head"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Load .env so the 0002 super_admin seed picks up ADMIN_EMAIL / ADMIN_PASSWORD
+    # (without this, a fresh DB seeds the admin with the config-default password).
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://trustx:trustx_dev@postgres:5432/trustx}
+    volumes:
+      - ./backend:/app
+    profiles:
+      - migrate
+
+volumes:
+  pg_data:
+  ts_data:
+  redis_data:
