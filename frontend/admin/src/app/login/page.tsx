@@ -75,11 +75,6 @@ export default function LoginPage() {
             <div className="auth-left__bg" />
             <div className="auth-left__mandala" aria-hidden="true" />
             <div className="auth-left__content">
-              <h1 className="auth-left__title">Admin Console</h1>
-              <p className="auth-left__subtitle">
-                Manage users, KYC, deposits, the trading book, and the
-                insurance engine from one secure panel.
-              </p>
               <div className="auth-left__steps">
                 {STEPS.map((s) => (
                   <div
@@ -97,9 +92,6 @@ export default function LoginPage() {
           {/* ── RIGHT PANEL ── */}
           <div className="auth-right">
             <form className="auth-form" onSubmit={handleSubmit} noValidate>
-              <div className="flex justify-center mb-2">
-                <img src="/images/feb.png" alt="Trustx" className="w-16 h-16 object-contain" />
-              </div>
               <div>
                 <h2 className="auth-form__title">Trustx Admin</h2>
                 <p className="auth-form__subtitle">Broker administration panel — secure access only.</p>
