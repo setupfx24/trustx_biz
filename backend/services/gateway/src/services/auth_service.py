@@ -656,11 +656,9 @@ async def register_user(
         role="user",
         status="active",
         kyc_status="pending",
-        # New email-password sign-ups must verify before they can log in.
-        # Google / wallet sign-ups stay verified=True (third-party already
-        # confirmed ownership). Migration 0038 backfills True for existing
-        # users so this gate doesn't lock anyone out on deploy.
-        email_verified=False,
+        # Email verification gate disabled — new sign-ups are immediately
+        # active and can log in right after registering (no inbox round-trip).
+        email_verified=True,
     )
     db.add(user)
     await db.flush()
@@ -691,16 +689,13 @@ async def register_user(
 
     await db.commit()
 
-    # Email/password signups do NOT receive a session cookie here — the user
-    # must click the verify link in their inbox, which is the ONLY path that
-    # issues cookies + lets them into the app. This is the email-verification
-    # gate the platform relies on; previously the cookies-on-register flow
-    # let traders skip verification entirely (regression closed 2026-05-12).
-    _send_verify_email(user, request)
+    # Email verification disabled — the account is active immediately, so we
+    # don't send a verify email. The user can sign in with their credentials
+    # right away on the login page.
     return {
         "email": user.email,
-        "verification_sent": True,
-        "message": "Account created. Check your email to verify and sign in.",
+        "verification_sent": False,
+        "message": "Account created. You can now sign in.",
     }
 
 
@@ -730,19 +725,8 @@ async def login_user(
     if not user or not verify_password(password, user.password_hash):
         raise AuthServiceError("Invalid credentials", 401)
 
-    # Gate sign-in until the user has confirmed ownership of the email.
-    # Existing users (registered before migration 0038) were backfilled
-    # with email_verified=True so this only blocks new sign-ups that
-    # haven't clicked the link yet. The 403 carries a structured detail
-    # so the frontend can render a "check your email + resend" UI.
-    if not bool(getattr(user, "email_verified", True)):
-        raise AuthServiceError(
-            {
-                "code": "email_unverified",
-                "message": "Please confirm your email before signing in. Check your inbox for the verification link.",
-            },
-            403,
-        )
+    # Email-verification gate removed — users can sign in immediately after
+    # registering, no inbox confirmation required.
 
     if user.status == "banned":
         raise AuthServiceError("Account has been banned", 403)

@@ -147,22 +147,6 @@ function LoginContent() {
       const msg = err instanceof Error ? err.message : '';
       if (msg.includes('2FA') && !msg.includes('Invalid')) {
         setNeed2FA(true);
-      } else if (msg.includes('email_unverified') || msg.includes('confirm your email')) {
-        // Backend returned 403 with code=email_unverified. Bounce the user
-        // back to /auth/check-email with their address pre-filled so the
-        // resend-link button works without retyping.
-        toast(
-          'Please confirm your email before signing in. We just sent a fresh link.',
-          { icon: '✉️', duration: 6000 },
-        );
-        try {
-          await fetch('/api/v1/auth/resend-verification', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email }),
-          });
-        } catch { /* silent — non-critical */ }
-        router.push(`/auth/check-email?email=${encodeURIComponent(email)}`);
       } else {
         setErrorDialog({ title: 'Sign-in failed', message: authErrorMessage(err, 'login') });
       }

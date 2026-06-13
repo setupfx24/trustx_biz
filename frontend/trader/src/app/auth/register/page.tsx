@@ -201,12 +201,11 @@ function RegisterContent() {
         // verifier short-circuits the same way (dev parity).
         cf_turnstile_token: turnstileToken || undefined,
       });
-      // Account created. The backend does NOT issue session cookies here
-      // — the user has to click the verify link in their inbox, which is
-      // the only path that grants a session. Bounce to /auth/check-email
-      // so the user knows to check their inbox.
-      toast.success('Account created — check your email to verify and sign in.');
-      router.push(`/auth/check-email?email=${encodeURIComponent(form.email)}`);
+      // Email verification disabled — register() also logs the user in, so
+      // drop them straight into the dashboard instead of bouncing through
+      // the login / check-email screens.
+      toast.success('Welcome to Trustx!');
+      router.push('/dashboard');
     } catch (err: any) {
       const msg = err?.message || 'Registration failed';
       toast.error(msg);

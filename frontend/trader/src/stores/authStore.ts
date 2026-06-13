@@ -131,12 +131,17 @@ export const useAuthStore = create<AuthState>()((set) => ({
   register: async (data) => {
     set({ isLoading: true });
     try {
-      // Register no longer issues session cookies — the user must click the
-      // verify link in their inbox to log in. Don't fetch /auth/me here
-      // (would 401) and leave the store unauthenticated; the page handler
-      // redirects to /auth/check-email after this resolves.
+      // Email verification is disabled — the backend marks new accounts as
+      // active immediately. So right after registering we log the user in
+      // with the same credentials and load their profile, dropping them
+      // straight into the dashboard with no inbox round-trip.
       await api.post<{ email: string; verification_sent: boolean }>('/auth/register', data);
-      set({ isLoading: false });
+      await api.post<{ access_token: string; user_id: string; role: string }>('/auth/login', {
+        email: data.email,
+        password: data.password,
+      });
+      const user = await api.get<User>('/auth/me');
+      set({ user, isAuthenticated: true, isLoading: false, token: null });
     } catch (e) {
       set({ isLoading: false });
       throw e;
